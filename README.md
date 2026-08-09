@@ -53,6 +53,7 @@
 - 🌐 **代理支持** - 支持 HTTP/SOCKS5 代理
 - 📱 **Web 管理界面** - 直观的 Token 和配置管理
 - 🎨 **图片生成连续对话**
+- 🖼️ **OpenAI 原生媒体协议** - `POST /v1/images/generations`、`POST /v1/images/edits`、`POST /v1/videos`（异步任务 + 轮询 + 下载）
 - 🧩 **Gemini 官方请求体兼容** - 支持 `generateContent` / `streamGenerateContent`、`systemInstruction`、`contents.parts.text/inlineData/fileData`
 - ✅ **Gemini 官方格式已实测出图** - 已使用真实 Token 验证 `/models/{model}:generateContent` 可正常返回官方 `candidates[].content.parts[].inlineData`
 
@@ -342,7 +343,134 @@ Prometheus 可直接抓 `/metrics`。如果部署到 Kubernetes，建议只在�
 | `veo_3_1_r2v_fast_portrait_ultra_1080p` | 多图视频放大 | 1080P |
 | `veo_3_1_r2v_fast_landscape_ultra_1080p` | 多图视频放大 | 1080P |
 
-## 📡 API 使用示例（需要使用流式）
+## 🎯 原生媒体协议（推荐）
+
+图片/视频生成使用专用的媒体协议，而不是文本对话协议。这是推荐的接入方式。
+
+| 端点 | 说明 |
+| --- | --- |
+| `POST /v1/images/generations` | 文生图 |
+| `POST /v1/images/edits` | 图生图（`multipart/form-data` 或 JSON） |
+| `POST /v1/videos` | 创建视频任务（文生视频 / 图生视频） |
+| `GET /v1/videos` | 列出视频任务 |
+| `GET /v1/videos/{video_id}` | 查询任务状态 |
+| `GET /v1/videos/{video_id}/content` | 下载生成的视频 |
+| `POST /v1/videos/{video_id}/remix` | 用新提示词重新生成 |
+| `DELETE /v1/videos/{video_id}` | 删除任务 |
+
+认证方式与其他端点一致：`Authorization: Bearer <api_key>`、`x-goog-api-key`、`?key=`。
+
+### 文生图
+
+`size` 决定画面比例，`quality` 映射到放大档位（`medium` → 2K，`high`/`hd` → 4K）。
+
+```bash
+curl -X POST "http://localhost:8000/v1/images/generations" \
+  -H "Authorization: Bearer han1234" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "gemini-3.1-flash-image",
+    "prompt": "一颗放在木桌上的红苹果，棚拍光线，极简背景",
+    "size": "1024x1024",
+    "quality": "high",
+    "n": 1
+  }'
+```
+
+响应为标准 OpenAI 图片格式：
+
+```json
+{
+  "created": 1712697600,
+  "data": [{ "url": "http://localhost:8000/tmp/xxxx.png" }]
+}
+```
+
+需要内联字节时传 `"response_format": "b64_json"`，返回 `data[].b64_json`。
+
+### 图生图
+
+上传文件（官方 multipart 形式）：
+
+```bash
+curl -X POST "http://localhost:8000/v1/images/edits" \
+  -H "Authorization: Bearer han1234" \
+  -F "model=gemini-3.1-flash-image" \
+  -F "prompt=把背景换成雪山日落" \
+  -F "image=@input.png"
+```
+
+也支持 JSON 传 data URL 或图片 URL：
+
+```bash
+curl -X POST "http://localhost:8000/v1/images/edits" \
+  -H "Authorization: Bearer han1234" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "gemini-3.1-flash-image",
+    "prompt": "把背景换成雪山日落",
+    "image": "https://example.com/input.png"
+  }'
+```
+
+### 文生视频
+
+视频生成是异步任务：创建后立即返回 `queued`，随后轮询状态。
+
+```bash
+curl -X POST "http://localhost:8000/v1/videos" \
+  -H "Authorization: Bearer han1234" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "veo_3_1_t2v_fast",
+    "prompt": "一只猫在雨中的霓虹街道上奔跑",
+    "seconds": "8",
+    "size": "1280x720"
+  }'
+```
+
+```json
+{
+  "id": "video_2f1c...",
+  "object": "video",
+  "model": "veo_3_1_t2v_fast_8s",
+  "status": "queued",
+  "progress": 0,
+  "created_at": 1712697600
+}
+```
+
+轮询直到 `status` 为 `completed`，然后下载：
+
+```bash
+curl "http://localhost:8000/v1/videos/video_2f1c..." \
+  -H "Authorization: Bearer han1234"
+
+curl "http://localhost:8000/v1/videos/video_2f1c.../content" \
+  -H "Authorization: Bearer han1234" \
+  -o output.mp4
+```
+
+失败时 `status` 为 `failed`，并附带 `error.message`。
+
+### 图生视频
+
+用 `input_reference` 传参考图，模型需选择图生视频类型（如 `veo_3_1_i2v_s_fast_fl`）：
+
+```bash
+curl -X POST "http://localhost:8000/v1/videos" \
+  -H "Authorization: Bearer han1234" \
+  -F "model=veo_3_1_i2v_s_fast_fl" \
+  -F "prompt=让画面里的人物缓缓转头微笑" \
+  -F "seconds=8" \
+  -F "input_reference=@first_frame.png"
+```
+
+`seconds` 支持 `4` / `6` / `8`，其他数值会就近映射。给纯文生视频模型传参考图会返回 400。
+
+## 📡 兼容协议使用示例（Chat Completions / Gemini）
+
+> 以下 `OpenAI-compatible` 与 Gemini 格式为兼容旧客户端而保留，新接入建议使用上方原生媒体协议。
 
 > 除了下方 `OpenAI-compatible` 示例，服务也支持 Gemini 官方格式：
 > - `POST /v1beta/models/{model}:generateContent`
