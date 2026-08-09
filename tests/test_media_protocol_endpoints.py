@@ -437,9 +437,16 @@ class VideoEndpointTests(MediaEndpointTestCase):
 
         self.assertEqual(handler.calls[0]["model"], "veo_3_1_t2v_fast_portrait")
 
-    def test_input_reference_rejected_for_t2v_model(self):
-        client = build_client(FakeHandler())
-        response = client.post(
+    def test_input_reference_on_t2v_model_routes_to_i2v(self):
+        """A t2v model given a reference image routes instead of failing.
+
+        Previously this was a hard 400. Auto-routing now moves the request to
+        the image-to-video sibling, so the reference is honoured.
+        """
+        handler = FakeHandler(url="http://testserver/tmp/out.mp4")
+        client = build_client(handler)
+
+        created = client.post(
             "/v1/videos",
             headers=AUTH,
             json={
@@ -448,7 +455,12 @@ class VideoEndpointTests(MediaEndpointTestCase):
                 "input_reference": PNG_DATA_URL,
             },
         )
-        self.assertEqual(response.status_code, 400)
+        self.assertEqual(created.status_code, 200)
+        self._wait_for_status(client, created.json()["id"], "completed")
+
+        routed = handler.calls[0]["model"]
+        self.assertEqual(MODEL_CONFIG[routed]["video_type"], "i2v")
+        self.assertEqual(handler.calls[0]["images"], [PNG_BYTES])
 
     def test_input_reference_accepted_for_i2v_model(self):
         handler = FakeHandler(url="http://testserver/tmp/out.mp4")
@@ -467,18 +479,18 @@ class VideoEndpointTests(MediaEndpointTestCase):
 
         self.assertEqual(handler.calls[0]["images"], [PNG_BYTES])
 
-    def test_two_images_rejected_for_first_frame_only_model(self):
-        """`veo_3_1_i2v_lite_*` takes a first frame only; 2 images must 400.
+    def test_two_images_route_to_interpolation_variant(self):
+        """A first-frame-only model given 2 images routes to first+last.
 
         Reproduces the real-world failure where a first frame plus a character
-        reference was sent to a max_images=1 model. The request must be refused
-        at the edge with an actionable hint instead of silently dropping the
-        second image.
+        reference was sent to a max_images=1 model. Rather than rejecting, the
+        request is routed to the sibling accepting two images, keeping the
+        requested duration and orientation.
         """
         handler = FakeHandler(url="http://testserver/tmp/out.mp4")
         client = build_client(handler)
 
-        response = client.post(
+        created = client.post(
             "/v1/videos",
             headers=AUTH,
             json={
@@ -486,23 +498,77 @@ class VideoEndpointTests(MediaEndpointTestCase):
                 "prompt": "废土环境，镜头平移",
                 "input_reference": [PNG_DATA_URL, PNG_DATA_URL],
             },
-        )
+        ).json()
 
-        self.assertEqual(response.status_code, 400)
-        detail = response.json()["error"]["message"]
-        self.assertIn("accepts 1", detail)
-        self.assertIn("got 2", detail)
-        # Points the caller at the models that do accept more images.
-        self.assertIn("interpolation", detail)
-        # Nothing should have been sent upstream.
-        self.assertEqual(handler.calls, [])
+        self.assertEqual(created["model"], "veo_3_1_interpolation_lite_8s_landscape")
+        self._wait_for_status(client, created["id"], "completed")
+        # Both images reach the pipeline; neither is dropped.
+        self.assertEqual(handler.calls[0]["images"], [PNG_BYTES, PNG_BYTES])
 
-    def test_interpolation_model_requires_two_images(self):
-        """First+last frame models must reject a single image."""
-        handler = FakeHandler(url="http://testserver/tmp/out.mp4")
-        client = build_client(handler)
+    def test_zero_images_routes_to_text_to_video(self):
+        """Omitting the reference falls back to the t2v sibling."""
+        client = build_client(FakeHandler(url="http://testserver/tmp/out.mp4"))
 
-        response = client.post(
+        created = client.post(
+            "/v1/videos",
+            headers=AUTH,
+            json={"model": "veo_3_1_i2v_lite_8s_landscape", "prompt": "废土远景"},
+        ).json()
+
+        self.assertEqual(created["model"], "veo_3_1_t2v_lite_8s_landscape")
+
+    def test_one_image_keeps_first_frame_model(self):
+        """A already-matching count must not be rerouted."""
+        client = build_client(FakeHandler(url="http://testserver/tmp/out.mp4"))
+
+        created = client.post(
+            "/v1/videos",
+            headers=AUTH,
+            json={
+                "model": "veo_3_1_i2v_lite_8s_landscape",
+                "prompt": "x",
+                "input_reference": PNG_DATA_URL,
+            },
+        ).json()
+
+        self.assertEqual(created["model"], "veo_3_1_i2v_lite_8s_landscape")
+
+    def test_routing_preserves_portrait_and_duration(self):
+        client = build_client(FakeHandler(url="http://testserver/tmp/out.mp4"))
+
+        created = client.post(
+            "/v1/videos",
+            headers=AUTH,
+            json={
+                "model": "veo_3_1_i2v_lite_4s_portrait",
+                "prompt": "x",
+                "input_reference": [PNG_DATA_URL, PNG_DATA_URL],
+            },
+        ).json()
+
+        self.assertEqual(created["model"], "veo_3_1_interpolation_lite_4s_portrait")
+
+    def test_text_to_video_model_with_image_routes_to_i2v(self):
+        """Routing works in the other direction too."""
+        client = build_client(FakeHandler(url="http://testserver/tmp/out.mp4"))
+
+        created = client.post(
+            "/v1/videos",
+            headers=AUTH,
+            json={
+                "model": "veo_3_1_t2v_lite_8s_landscape",
+                "prompt": "x",
+                "input_reference": PNG_DATA_URL,
+            },
+        ).json()
+
+        self.assertEqual(created["model"], "veo_3_1_i2v_lite_8s_landscape")
+
+    def test_interpolation_model_with_one_image_routes_to_first_frame(self):
+        """First+last frame model given a single image falls back to i2v."""
+        client = build_client(FakeHandler(url="http://testserver/tmp/out.mp4"))
+
+        created = client.post(
             "/v1/videos",
             headers=AUTH,
             json={
@@ -510,11 +576,9 @@ class VideoEndpointTests(MediaEndpointTestCase):
                 "prompt": "morph",
                 "input_reference": PNG_DATA_URL,
             },
-        )
+        ).json()
 
-        self.assertEqual(response.status_code, 400)
-        self.assertIn("got 1", response.json()["error"]["message"])
-        self.assertEqual(handler.calls, [])
+        self.assertEqual(created["model"], "veo_3_1_i2v_lite_8s_landscape")
 
     def test_two_images_accepted_by_interpolation_model(self):
         """The same two images succeed on a model that supports 2."""

@@ -28,7 +28,13 @@ from ..core.media_models import (
     VideoRemixRequest,
     build_video_list_payload,
 )
+from ..services.generation_handler import MODEL_CONFIG
 from ..services.video_jobs import VideoJob, video_job_store
+from ..core.video_routing import (
+    describe_image_range,
+    route_video_model,
+    supported_image_counts,
+)
 from .media_common import (
     DEFAULT_VIDEO_MODEL,
     MediaParams,
@@ -46,15 +52,16 @@ from .media_common import (
 router = APIRouter(prefix="/v1/videos", tags=["videos"])
 
 
-def _describe_image_range(min_images: int, max_images: Optional[int]) -> str:
-    """Render an image-count requirement as `1`, `1-2` or `up to 3`."""
-    if max_images is None:
-        return f"at least {min_images}"
-    if min_images == max_images:
-        return str(max_images)
-    if min_images <= 0:
-        return f"up to {max_images}"
-    return f"{min_images}-{max_images}"
+def _supported_counts_hint(model: str) -> str:
+    """Tell the caller which reference image counts this family can handle."""
+    counts = supported_image_counts(model, MODEL_CONFIG)
+    if not counts:
+        return ""
+    rendered = ", ".join(str(count) for count in counts)
+    return (
+        f". This model family supports {rendered} reference image(s); "
+        "the matching variant is selected automatically"
+    )
 
 
 async def _read_json_body(request: Request) -> Dict[str, Any]:
@@ -109,6 +116,12 @@ async def _start_job(
         images=images,
         passthrough=passthrough,
     )
+    assert_model_type(model, "video")
+
+    # Pick the sibling variant that matches how many reference images the
+    # client actually sent (0 -> t2v, 1 -> first frame, 2 -> first+last,
+    # 3+ -> multi-reference), keeping duration, orientation and family.
+    model = route_video_model(model, len(images), MODEL_CONFIG)
     model_config = assert_model_type(model, "video")
 
     # Reference images only make sense for i2v/interpolation style models.
@@ -121,9 +134,9 @@ async def _start_job(
             ),
         )
 
-    # Reject counts the model cannot honour instead of silently dropping
-    # images: quietly truncating changes what the user asked for, and they
-    # would only notice by inspecting the rendered video.
+    # If routing found no variant for this count, report it instead of
+    # silently dropping images: quiet truncation changes what the user asked
+    # for, and they would only notice by inspecting the rendered video.
     min_images = int(model_config.get("min_images") or 0)
     max_images = model_config.get("max_images")
     if not isinstance(max_images, int) or max_images <= 0:
@@ -133,26 +146,19 @@ async def _start_job(
         raise HTTPException(
             status_code=400,
             detail=(
-                f"Model '{model}' requires {_describe_image_range(min_images, max_images)} "
+                f"Model '{model}' requires {describe_image_range(min_images, max_images)} "
                 f"input reference image(s), got {len(images)}"
+                f"{_supported_counts_hint(model)}"
             ),
         )
 
     if max_images is not None and len(images) > max_images:
-        hint = ""
-        if max_images == 1:
-            # The common case: a first-frame model given both a first frame
-            # and a character/style reference.
-            hint = (
-                ". This model only accepts a first frame; use an interpolation "
-                "model for first+last frame, or a multi-reference (r2v) model "
-                "for several reference images"
-            )
         raise HTTPException(
             status_code=400,
             detail=(
-                f"Model '{model}' accepts {_describe_image_range(min_images, max_images)} "
-                f"input reference image(s), got {len(images)}{hint}"
+                f"Model '{model}' accepts {describe_image_range(min_images, max_images)} "
+                f"input reference image(s), got {len(images)}"
+                f"{_supported_counts_hint(model)}"
             ),
         )
 

@@ -478,18 +478,37 @@ curl "http://localhost:8000/v1/videos/video_2f1c.../content" \
 
 ### 图生视频
 
-用 `input_reference` 传参考图，模型需选择图生视频类型（如 `veo_3_1_i2v_s_fast_fl`）：
+用 `input_reference` 传参考图：
 
 ```bash
 curl -X POST "http://localhost:8000/v1/videos" \
   -H "Authorization: Bearer han1234" \
-  -F "model=veo_3_1_i2v_s_fast_fl" \
+  -F "model=veo_3_1_i2v_lite_8s_landscape" \
   -F "prompt=让画面里的人物缓缓转头微笑" \
   -F "seconds=8" \
   -F "input_reference=@first_frame.png"
 ```
 
-`seconds` 支持 `4` / `6` / `8`，其他数值会就近映射。给纯文生视频模型传参考图会返回 400。
+`seconds` 支持 `4` / `6` / `8`，其他数值会就近映射。
+
+#### 参考图数量自动选型
+
+Flow 把「同一件事」拆成了几个模型族，区别只在于接受几张参考图。你不需要自己记住该用哪个族，
+按实际传的图片数会自动切换到同族的正确变体，**时长、横竖屏、画质档位都保持不变**：
+
+| 参考图数量 | 实际语义 | 自动切换到 |
+|---|---|---|
+| 0 张 | 纯文生视频 | `t2v` 族 |
+| 1 张 | 首帧 | `i2v` 族 |
+| 2 张 | 首帧 + 尾帧 | `interpolation` 族 |
+| 3 张 | 多图参考 | `r2v` 族 |
+
+例如传 `model=veo_3_1_i2v_lite_8s_landscape`（仅支持首帧）但给了 2 张图，会自动改用
+`veo_3_1_interpolation_lite_8s_landscape`；给 0 张图则改用 `veo_3_1_t2v_lite_8s_landscape`。
+响应里的 `model` 字段会告诉你最终实际使用的模型。
+
+超出所有变体上限时（例如 4 张图）仍然返回 400，并提示该族支持的数量，不会静默丢弃多余图片。
+视频续写模型 `veo_3_1_extend` 由 `video_media_id` 驱动，不参与自动选型。
 
 ## 📡 兼容协议使用示例（Chat Completions / Gemini）
 
