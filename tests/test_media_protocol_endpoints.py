@@ -324,6 +324,69 @@ class VideoEndpointTests(MediaEndpointTestCase):
         self.assertEqual(content.content, b"MP4DATA")
         self.assertEqual(content.headers["content-type"], "video/mp4")
 
+    def test_completed_job_exposes_download_url(self):
+        """Downstream gateways (New API) read `url` once status is completed."""
+        handler = FakeHandler(url="http://testserver/tmp/out.mp4")
+        client = build_client(handler)
+
+        created = client.post(
+            "/v1/videos",
+            headers=AUTH,
+            json={"model": "veo_3_1_t2v_fast", "prompt": "a cat surfing"},
+        ).json()
+
+        # `url` must be absent/None while the job is still running.
+        self.assertIsNone(created.get("url"))
+
+        done = self._wait_for_status(client, created["id"], "completed")
+        self.assertEqual(done["url"], "http://testserver/tmp/out.mp4")
+
+    def test_url_falls_back_to_content_endpoint(self):
+        """When no direct asset URL exists, `url` points at our own endpoint."""
+        handler = FakeHandler(url="http://testserver/tmp/out.mp4")
+        client = build_client(handler)
+
+        created = client.post(
+            "/v1/videos", headers=AUTH, json={"model": "veo_3_1_t2v_fast", "prompt": "x"}
+        ).json()
+        self._wait_for_status(client, created["id"], "completed")
+
+        # Drop the upstream URL to exercise the fallback branch.
+        job = asyncio.run(videos_api.video_job_store.get(created["id"]))
+        job.url = None
+
+        resource = client.get(f"/v1/videos/{created['id']}", headers=AUTH).json()
+        self.assertEqual(
+            resource["url"], f"http://testserver/v1/videos/{created['id']}/content"
+        )
+
+    def test_failed_job_has_no_url(self):
+        handler = FakeHandler(error={"message": "boom", "status_code": 500})
+        client = build_client(handler)
+
+        created = client.post(
+            "/v1/videos", headers=AUTH, json={"model": "veo_3_1_t2v_fast", "prompt": "x"}
+        ).json()
+        failed = self._wait_for_status(client, created["id"], "failed")
+
+        self.assertIsNone(failed.get("url"))
+
+    def test_quality_is_echoed_back(self):
+        handler = FakeHandler(url="http://testserver/tmp/out.mp4")
+        client = build_client(handler)
+
+        created = client.post(
+            "/v1/videos",
+            headers=AUTH,
+            json={
+                "model": "veo_3_1_t2v_fast",
+                "prompt": "x",
+                "quality": "standard",
+            },
+        ).json()
+
+        self.assertEqual(created["quality"], "standard")
+
     def test_content_conflict_before_completion(self):
         handler = FakeHandler(error={"message": "boom", "status_code": 500})
         client = build_client(handler)

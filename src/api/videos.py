@@ -81,6 +81,7 @@ async def _start_job(
     images: List[bytes],
     passthrough: Dict[str, Any],
     base_url: Optional[str],
+    quality: Optional[str] = None,
     remixed_from: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Validate input, register the job and kick off background generation."""
@@ -95,6 +96,7 @@ async def _start_job(
         requested_model=requested_model,
         default_model=DEFAULT_VIDEO_MODEL,
         size=size,
+        quality=quality,
         seconds=normalized_seconds,
         images=images,
         passthrough=passthrough,
@@ -127,6 +129,7 @@ async def _start_job(
         prompt=prompt,
         seconds=normalized_seconds,
         size=size,
+        quality=quality,
         remixed_from_video_id=remixed_from,
     )
     params = MediaParams(
@@ -135,10 +138,11 @@ async def _start_job(
         images=images,
         size=size,
         seconds=normalized_seconds,
+        quality=quality,
     )
     job.task = asyncio.create_task(_run_job(job, params, base_url))
     debug_logger.log_info(f"[VIDEO_JOB] {job.id} 已创建 - 模型: {model}")
-    return job.to_resource()
+    return job.to_resource(base_url=base_url)
 
 
 @router.post("")
@@ -150,6 +154,7 @@ async def create_video(
     model: Optional[str] = Form(None),
     seconds: Optional[str] = Form(None),
     size: Optional[str] = Form(None),
+    quality: Optional[str] = Form(None),
     input_reference: Optional[List[UploadFile]] = File(None),
 ):
     """Create a video generation job."""
@@ -163,6 +168,7 @@ async def create_video(
             requested_model = model
             requested_seconds = seconds
             requested_size = size
+            requested_quality = quality
         else:
             passthrough = await _read_json_body(raw_request)
             payload = VideoCreateRequest.model_validate(passthrough)
@@ -171,12 +177,14 @@ async def create_video(
             requested_model = payload.model
             requested_seconds = payload.seconds
             requested_size = payload.size
+            requested_quality = payload.quality
 
         resource = await _start_job(
             prompt=resolved_prompt,
             requested_model=requested_model,
             seconds=requested_seconds,
             size=requested_size,
+            quality=requested_quality,
             images=images,
             passthrough=passthrough,
             base_url=get_request_base_url(raw_request),
@@ -196,13 +204,19 @@ async def create_video(
 @router.get("")
 @router.get("/")
 async def list_videos(
+    raw_request: Request,
     limit: int = Query(20, ge=1, le=100),
     order: str = Query("desc"),
     api_key: str = Depends(verify_api_key_flexible),
 ):
     """List known video jobs, newest first by default."""
     jobs = await video_job_store.list(limit=limit, order=order)
-    return JSONResponse(content=build_video_list_payload([job.to_resource() for job in jobs]))
+    base_url = get_request_base_url(raw_request)
+    return JSONResponse(
+        content=build_video_list_payload(
+            [job.to_resource(base_url=base_url) for job in jobs]
+        )
+    )
 
 
 async def _require_job(video_id: str) -> VideoJob:
@@ -213,11 +227,17 @@ async def _require_job(video_id: str) -> VideoJob:
 
 
 @router.get("/{video_id}")
-async def retrieve_video(video_id: str, api_key: str = Depends(verify_api_key_flexible)):
+async def retrieve_video(
+    video_id: str,
+    raw_request: Request,
+    api_key: str = Depends(verify_api_key_flexible),
+):
     """Poll a video job."""
     try:
         job = await _require_job(video_id)
-        return JSONResponse(content=job.to_resource())
+        return JSONResponse(
+            content=job.to_resource(base_url=get_request_base_url(raw_request))
+        )
     except HTTPException as exc:
         return JSONResponse(
             status_code=exc.status_code,
@@ -281,6 +301,7 @@ async def remix_video(
             requested_model=request.model or source.model,
             seconds=request.seconds or source.seconds,
             size=request.size or source.size,
+            quality=request.quality or source.quality,
             images=[],
             passthrough=passthrough,
             base_url=get_request_base_url(raw_request),

@@ -80,6 +80,7 @@ class VideoCreateRequest(BaseModel):
     model: Optional[str] = None
     seconds: Optional[str] = None
     size: Optional[str] = None
+    quality: Optional[str] = None
     input_reference: Optional[Any] = None
     user: Optional[str] = None
 
@@ -93,6 +94,7 @@ class VideoRemixRequest(BaseModel):
     model: Optional[str] = None
     seconds: Optional[str] = None
     size: Optional[str] = None
+    quality: Optional[str] = None
 
     model_config = ConfigDict(extra="allow")
 
@@ -117,8 +119,13 @@ class VideoJobResource(BaseModel):
     expires_at: Optional[int] = None
     size: Optional[str] = None
     seconds: Optional[str] = None
+    quality: Optional[str] = None
     remixed_from_video_id: Optional[str] = None
     error: Optional[VideoError] = None
+    # Download link, present once the job reaches a terminal success state.
+    # Not part of the official Sora schema (clients are meant to call
+    # /content), but gateways such as New API read it directly.
+    url: Optional[str] = None
 
     model_config = ConfigDict(extra="allow")
 

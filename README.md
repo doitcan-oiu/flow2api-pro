@@ -440,18 +440,41 @@ curl -X POST "http://localhost:8000/v1/videos" \
 }
 ```
 
-轮询直到 `status` 为 `completed`，然后下载：
+轮询直到 `status` 为 `completed`：
 
 ```bash
 curl "http://localhost:8000/v1/videos/video_2f1c..." \
   -H "Authorization: Bearer han1234"
+```
 
+完成后响应会带上 `url` 下载直链，便于 New API 等网关直接取用：
+
+```json
+{
+  "id": "video_2f1c...",
+  "object": "video",
+  "model": "veo_3_1_t2v_fast_8s",
+  "status": "completed",
+  "progress": 100,
+  "created_at": 1712697600,
+  "completed_at": 1712697900,
+  "expires_at": 1712784300,
+  "size": "1280x720",
+  "seconds": "8",
+  "quality": "standard",
+  "url": "http://localhost:8000/tmp/xxxx.mp4"
+}
+```
+
+也可以直接下载字节流：
+
+```bash
 curl "http://localhost:8000/v1/videos/video_2f1c.../content" \
   -H "Authorization: Bearer han1234" \
   -o output.mp4
 ```
 
-失败时 `status` 为 `failed`，并附带 `error.message`。
+失败时 `status` 为 `failed`，并附带 `error.message`，此时不返回 `url`。
 
 ### 图生视频
 

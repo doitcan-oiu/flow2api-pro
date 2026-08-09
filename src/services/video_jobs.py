@@ -42,6 +42,7 @@ class VideoJob:
     progress: int = 0
     seconds: Optional[str] = None
     size: Optional[str] = None
+    quality: Optional[str] = None
     remixed_from_video_id: Optional[str] = None
     completed_at: Optional[int] = None
     expires_at: Optional[int] = None
@@ -50,8 +51,14 @@ class VideoJob:
     error_message: Optional[str] = None
     task: Optional[asyncio.Task] = field(default=None, repr=False)
 
-    def to_resource(self) -> Dict[str, Any]:
-        """Serialize to the OpenAI ``video`` object shape."""
+    def to_resource(self, *, base_url: Optional[str] = None) -> Dict[str, Any]:
+        """Serialize to the OpenAI ``video`` object shape.
+
+        On completion the payload also carries ``url``, the direct download
+        link. Downstream gateways (New API and friends) read that field to hand
+        the asset to their clients instead of proxying
+        ``/v1/videos/{id}/content`` themselves.
+        """
         payload: Dict[str, Any] = {
             "id": self.id,
             "object": "video",
@@ -63,8 +70,15 @@ class VideoJob:
             "expires_at": self.expires_at,
             "size": self.size,
             "seconds": self.seconds,
+            "quality": self.quality,
             "remixed_from_video_id": self.remixed_from_video_id,
         }
+
+        if self.status == VIDEO_STATUS_COMPLETED:
+            # Prefer the upstream/cached asset URL; fall back to our own
+            # content endpoint so the field is never null once completed.
+            payload["url"] = self.url or self._content_url(base_url)
+
         if self.status == VIDEO_STATUS_FAILED:
             payload["error"] = {
                 "code": self.error_code or "generation_failed",
@@ -73,6 +87,13 @@ class VideoJob:
         else:
             payload["error"] = None
         return payload
+
+    def _content_url(self, base_url: Optional[str]) -> Optional[str]:
+        """Build the fallback download link served by this proxy."""
+        path = f"/v1/videos/{self.id}/content"
+        if not base_url:
+            return path
+        return f"{base_url.rstrip('/')}{path}"
 
 
 class VideoJobStore:
@@ -91,6 +112,7 @@ class VideoJobStore:
         prompt: str,
         seconds: Optional[str] = None,
         size: Optional[str] = None,
+        quality: Optional[str] = None,
         remixed_from_video_id: Optional[str] = None,
     ) -> VideoJob:
         job = VideoJob(
@@ -100,6 +122,7 @@ class VideoJobStore:
             created_at=int(time.time()),
             seconds=seconds,
             size=size,
+            quality=quality,
             remixed_from_video_id=remixed_from_video_id,
         )
         async with self._lock:
