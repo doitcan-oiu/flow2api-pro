@@ -467,6 +467,110 @@ class VideoEndpointTests(MediaEndpointTestCase):
 
         self.assertEqual(handler.calls[0]["images"], [PNG_BYTES])
 
+    def test_two_images_rejected_for_first_frame_only_model(self):
+        """`veo_3_1_i2v_lite_*` takes a first frame only; 2 images must 400.
+
+        Reproduces the real-world failure where a first frame plus a character
+        reference was sent to a max_images=1 model. The request must be refused
+        at the edge with an actionable hint instead of silently dropping the
+        second image.
+        """
+        handler = FakeHandler(url="http://testserver/tmp/out.mp4")
+        client = build_client(handler)
+
+        response = client.post(
+            "/v1/videos",
+            headers=AUTH,
+            json={
+                "model": "veo_3_1_i2v_lite_8s_landscape",
+                "prompt": "废土环境，镜头平移",
+                "input_reference": [PNG_DATA_URL, PNG_DATA_URL],
+            },
+        )
+
+        self.assertEqual(response.status_code, 400)
+        detail = response.json()["error"]["message"]
+        self.assertIn("accepts 1", detail)
+        self.assertIn("got 2", detail)
+        # Points the caller at the models that do accept more images.
+        self.assertIn("interpolation", detail)
+        # Nothing should have been sent upstream.
+        self.assertEqual(handler.calls, [])
+
+    def test_interpolation_model_requires_two_images(self):
+        """First+last frame models must reject a single image."""
+        handler = FakeHandler(url="http://testserver/tmp/out.mp4")
+        client = build_client(handler)
+
+        response = client.post(
+            "/v1/videos",
+            headers=AUTH,
+            json={
+                "model": "veo_3_1_interpolation_lite_8s_landscape",
+                "prompt": "morph",
+                "input_reference": PNG_DATA_URL,
+            },
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("got 1", response.json()["error"]["message"])
+        self.assertEqual(handler.calls, [])
+
+    def test_two_images_accepted_by_interpolation_model(self):
+        """The same two images succeed on a model that supports 2."""
+        handler = FakeHandler(url="http://testserver/tmp/out.mp4")
+        client = build_client(handler)
+
+        created = client.post(
+            "/v1/videos",
+            headers=AUTH,
+            json={
+                "model": "veo_3_1_interpolation_lite_8s_landscape",
+                "prompt": "morph",
+                "input_reference": [PNG_DATA_URL, PNG_DATA_URL],
+            },
+        ).json()
+        self._wait_for_status(client, created["id"], "completed")
+
+        self.assertEqual(handler.calls[0]["images"], [PNG_BYTES, PNG_BYTES])
+
+    def test_three_images_accepted_by_r2v_model(self):
+        """Multi-reference models accept up to 3 images."""
+        handler = FakeHandler(url="http://testserver/tmp/out.mp4")
+        client = build_client(handler)
+
+        created = client.post(
+            "/v1/videos",
+            headers=AUTH,
+            json={
+                "model": "veo_3_1_r2v_fast_8s",
+                "prompt": "scene",
+                "input_reference": [PNG_DATA_URL] * 3,
+            },
+        ).json()
+        self._wait_for_status(client, created["id"], "completed")
+
+        self.assertEqual(len(handler.calls[0]["images"]), 3)
+
+    def test_four_images_rejected_by_r2v_model(self):
+        """Exceeding the multi-reference cap is refused, not truncated."""
+        handler = FakeHandler(url="http://testserver/tmp/out.mp4")
+        client = build_client(handler)
+
+        response = client.post(
+            "/v1/videos",
+            headers=AUTH,
+            json={
+                "model": "veo_3_1_r2v_fast_8s",
+                "prompt": "scene",
+                "input_reference": [PNG_DATA_URL] * 4,
+            },
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("got 4", response.json()["error"]["message"])
+        self.assertEqual(handler.calls, [])
+
     def test_image_model_rejected_on_video_endpoint(self):
         client = build_client(FakeHandler())
         response = client.post(

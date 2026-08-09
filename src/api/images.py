@@ -37,7 +37,10 @@ from .media_common import (
 
 router = APIRouter(prefix="/v1/images", tags=["images"])
 
+# Upper bound on `n` (how many images we generate per request).
 MAX_IMAGES = 4
+# Upper bound on reference images accepted by the edits endpoint.
+MAX_REFERENCE_IMAGES = 4
 
 
 async def _read_json_body(request: Request) -> Dict[str, Any]:
@@ -253,7 +256,14 @@ async def edit_image(
         if not images:
             raise HTTPException(status_code=400, detail="At least one image is required")
 
-        images = images[:MAX_IMAGES]
+        if len(images) > MAX_REFERENCE_IMAGES:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"At most {MAX_REFERENCE_IMAGES} reference image(s) are supported, "
+                    f"got {len(images)}"
+                ),
+            )
 
         resolved_model = resolve_media_model(
             requested_model=requested_model,

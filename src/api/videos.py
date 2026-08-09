@@ -45,7 +45,16 @@ from .media_common import (
 
 router = APIRouter(prefix="/v1/videos", tags=["videos"])
 
-MAX_REFERENCE_IMAGES = 3
+
+def _describe_image_range(min_images: int, max_images: Optional[int]) -> str:
+    """Render an image-count requirement as `1`, `1-2` or `up to 3`."""
+    if max_images is None:
+        return f"at least {min_images}"
+    if min_images == max_images:
+        return str(max_images)
+    if min_images <= 0:
+        return f"up to {max_images}"
+    return f"{min_images}-{max_images}"
 
 
 async def _read_json_body(request: Request) -> Dict[str, Any]:
@@ -90,7 +99,6 @@ async def _start_job(
         raise HTTPException(status_code=400, detail="Prompt cannot be empty")
 
     normalized_seconds = normalize_seconds(seconds)
-    images = images[:MAX_REFERENCE_IMAGES]
 
     model = resolve_media_model(
         requested_model=requested_model,
@@ -113,16 +121,40 @@ async def _start_job(
             ),
         )
 
+    # Reject counts the model cannot honour instead of silently dropping
+    # images: quietly truncating changes what the user asked for, and they
+    # would only notice by inspecting the rendered video.
     min_images = int(model_config.get("min_images") or 0)
+    max_images = model_config.get("max_images")
+    if not isinstance(max_images, int) or max_images <= 0:
+        max_images = None
+
     if min_images and len(images) < min_images:
         raise HTTPException(
             status_code=400,
-            detail=f"Model '{model}' requires at least {min_images} input reference image(s)",
+            detail=(
+                f"Model '{model}' requires {_describe_image_range(min_images, max_images)} "
+                f"input reference image(s), got {len(images)}"
+            ),
         )
 
-    max_images = model_config.get("max_images")
-    if isinstance(max_images, int) and max_images > 0 and len(images) > max_images:
-        images = images[:max_images]
+    if max_images is not None and len(images) > max_images:
+        hint = ""
+        if max_images == 1:
+            # The common case: a first-frame model given both a first frame
+            # and a character/style reference.
+            hint = (
+                ". This model only accepts a first frame; use an interpolation "
+                "model for first+last frame, or a multi-reference (r2v) model "
+                "for several reference images"
+            )
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Model '{model}' accepts {_describe_image_range(min_images, max_images)} "
+                f"input reference image(s), got {len(images)}{hint}"
+            ),
+        )
 
     job = await video_job_store.create(
         model=model,
